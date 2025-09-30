@@ -11,7 +11,7 @@ namespace NvidiaPersonasJapanDataVirtualSurvey.Core.Models;
 /// <param name="Url">Direct download URL for the Parquet file.</param>
 /// <param name="Filename">Local filename suggested by server.</param>
 /// <param name="Size">Approximate size in bytes.</param>
-public sealed record class ParquetFileItem(
+internal sealed record class ParquetFileItem(
     string Dataset,
     string Config,
     string Split,

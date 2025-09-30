@@ -9,38 +9,82 @@ using OpenAI.Batch;
 using OpenAI.Chat;
 using Parquet;
 using Parquet.Data;
+using OpenAI.Files;
+using NvidiaPersonasJapanDataVirtualSurvey.Core.Models;
 
 namespace NvidiaPersonasJapanDataVirtualSurvey.Core;
 
-#pragma warning disable OPENAI001 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
-public class SurveyService(BatchClient client, IProgress<string>? progress = null)
-#pragma warning restore OPENAI001 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
+#pragma warning disable OPENAI001 
+public class SurveyService
 {
-    public async Task RunSurveyAsync()
+    private readonly BatchClient batchClient;
+    private readonly OpenAIFileClient fileClient;
+    private readonly string batchDeploymentName;
+    private readonly IProgress<string>? progress;
+
+    private List<PersonaRecord> personaList;
+
+    private SurveyService(BatchClient batchClient, OpenAIFileClient fileClient, string batchDeploymentName, IProgress<string>? progress, List<PersonaRecord> personaList)
     {
-        //var loader = new DataLoader(progress);
-        //var list = await loader.LoadAsync(20);
+        this.batchClient = batchClient;
+        this.fileClient = fileClient;
+        this.batchDeploymentName = batchDeploymentName;
+        this.progress = progress;
+        this.personaList = personaList;
+    }
 
+    public static async Task<SurveyService> CreateAsync(BatchClient batchClient, OpenAIFileClient fileClient, string batchDeploymentName, int SampleSize = 20, IProgress<string>? progress = null)
+    {
+        var loader = new DataLoader(progress);
+        var personaList = await loader.LoadAsync(SampleSize);
+        
+        return new SurveyService(batchClient, fileClient, batchDeploymentName, progress, personaList.ToList());
+    }
 
-        var inputLines = new object[]
+    public async Task<SurveyResponse> RunSurveyAsync(ISurveyRequest request)
+    {
+        List<BatchRequestItem> payloads = new List<BatchRequestItem>();
+
+        foreach (var persona in personaList)
         {
-            new {
-                custom_id = "task-1",
-                method = "POST",
-                url = "/chat/completions",
-                body = new {
-                    model = "gpt-4.1-batch", // デプロイ名
-                    messages = new object[] {
-                        new { role = "system", content = "You are a helpful assistant. Answer in Japanese." },
-                        new { role = "user",   content = "Azure OpenAIのバッチ推論の特徴を一文で説明して。" }
-                    }
+            payloads.Add(
+                new BatchRequestItem(
+                    CustomId: persona.Uuid.ToString(), //ペルソナのIDとバッチタスクのIDを紐づける
+                    Body: new BatchRequestBody(
+                        Model: batchDeploymentName,
+                        Messages:
+                        [
+                            new Models.ChatMessage("system", request.GetSystemPrompt(persona)),
+                            new Models.ChatMessage("user", request.GetUserPrompt())
+                        ]
+                    )
+                )
+            );
+        }
+
+        AoaiBatchService batchService = new AoaiBatchService(batchClient, fileClient, progress);
+
+        var uploadedDataId = await batchService.UploadBatchInputAsync(payloads.ToArray());
+        var operation = await batchService.CreateBatchJobAsync(uploadedDataId);
+        var status = await batchService.WaitForCompleteBatchJobAsync(operation);
+        var results = await batchService.GetBatchResultsAsync(status.OutputFileId!);
+
+        SurveyResponse response = new SurveyResponse();
+
+        foreach (var persona in personaList)
+        {
+            var result = results.FirstOrDefault(r => r.CustomId == persona.Uuid.ToString());
+            if (result != null)
+            {
+                if (result.Response?.Body?.Choices != null && result.Response.Body.Choices.Length > 0)
+                {
+                    response.Answers.Add(new PersonaAnswer(persona, result.Response.Body.Choices[0].Message?.Content ?? ""));
+                    response.Usage.CompletionTokens += result.Response.Body.Usage?.CompletionTokens ?? 0;
+                    response.Usage.PromptTokens += result.Response.Body.Usage?.PromptTokens ?? 0;
                 }
             }
-        };
-
-        var jsonContent = JsonSerializer.Serialize(inputLines);
-        var binaryContent = BinaryContent.Create(BinaryData.FromString(jsonContent));
-        var result = await client.CreateBatchAsync(binaryContent, waitUntilCompleted: true);
-        ;
+        }
+        return response;
     }
 }
+#pragma warning restore OPENAI001
